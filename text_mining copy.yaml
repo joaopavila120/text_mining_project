@@ -1,0 +1,45 @@
+name: text-mining
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    # Core Libraries
+    - numpy
+    - pandas
+    - tqdm
+    - ftfy
+    - emoji
+    - python-dotenv
+    # Visualization
+    - matplotlib
+    - seaborn
+    - wordcloud
+    - plotly
+    - nbformat>=4.2.0
+    # NLP
+    - nltk
+    - langdetect
+    - contractions
+    # Feature Engineering
+    - scikit-learn
+    - keras-preprocessing
+    - imbalanced-learn
+    # ML Models
+    - xgboost
+    # Embeddings and Transformers
+    - gensim
+    - transformers[torch]
+    - torch
+    - accelerate>=0.26.0
+    # Deep Learning
+    - tensorflow==2.15.0
+    - tf-keras
+    # Azure OpenAI
+    - openai
+    # Hyperparameter Optimization
+    - optuna
+    # Hugging Face Datasets
+    - datasets

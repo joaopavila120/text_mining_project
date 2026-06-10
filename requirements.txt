@@ -1,0 +1,16 @@
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+nltk
+wordcloud
+jupyter
+ipykernel
+# Optional extras for transformer-based experiments
+torch
+transformers
+accelerate
+datasets
+sentencepiece
+langchain

@@ -2,7 +2,6 @@ import os
 import re
 import pickle
 import warnings
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -14,17 +13,12 @@ from wordcloud import WordCloud
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import TweetTokenizer, word_tokenize
-from nltk.stem import WordNetLemmatizer, PorterStemmer, SnowballStemmer
+from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet
 from nltk import pos_tag
 
 # --- Sklearn ---
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score,
-    f1_score, classification_report, confusion_matrix,
-    ConfusionMatrixDisplay,
-)
 
 warnings.filterwarnings("ignore")
 
@@ -36,7 +30,7 @@ def download_nltk_resources():
     """Download all required NLTK resources."""
     resources = [
         "stopwords", "punkt", "wordnet",
-        "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "omw-1.4",
+        "punkt_tab", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "omw-1.4",
     ]
     for r in resources:
         nltk.download(r, quiet=True)
@@ -50,32 +44,6 @@ download_nltk_resources()
 LABEL_MAP = {0: "Bearish", 1: "Bullish", 2: "Neutral"}
 LABEL_COLORS = {0: "#E05C5C", 1: "#5CB85C", 2: "#5B9BD5"}
 RANDOM_STATE = 67
-
-# =============================================================================
-# 2. DATA LOADING
-# =============================================================================
-
-def load_data(train_path: str, test_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load train and test CSVs. Returns (train_df, test_df)."""
-    train_df = pd.read_csv(train_path)
-    test_df  = pd.read_csv(test_path)
-    print(f"Train shape : {train_df.shape}")
-    print(f"Test  shape : {test_df.shape}")
-    return train_df, test_df
-
-
-def basic_info(df: pd.DataFrame, name: str = "DataFrame") -> None:
-    """Print basic info: shape, dtypes, nulls, class distribution."""
-    print(f"\n{'='*50}")
-    print(f"  {name}")
-    print(f"{'='*50}")
-    print(df.dtypes)
-    print(f"\nNull values:\n{df.isnull().sum()}")
-    if "label" in df.columns:
-        counts = df["label"].value_counts().sort_index()
-        print(f"\nClass distribution:")
-        for k, v in counts.items():
-            print(f"  {k} ({LABEL_MAP[k]}): {v}  ({v/len(df)*100:.1f}%)")
 
 # =============================================================================
 # 3. CORPUS SPLIT
@@ -115,23 +83,14 @@ def make_split(
         print(f"Split saved to  : {save_path}")
     return split
 
-
-def load_split(path: str) -> dict:
-    """Load a previously saved train/val split from pickle."""
-    with open(path, "rb") as f:
-        split = pickle.load(f)
-    print(f"Split loaded from: {path}")
-    return split
-
 # =============================================================================
 # 4. PREPROCESSING FUNCTIONS
 # =============================================================================
 
 _stop_words  = set(stopwords.words("english"))
 _lemmatizer  = WordNetLemmatizer()
-_porter      = PorterStemmer()
-_snowball    = SnowballStemmer("english")
-_tweet_tok   = TweetTokenizer(preserve_case=False, strip_handles=True, reduce_len=True)
+_tweet_tok_lower = TweetTokenizer(preserve_case=False, strip_handles=True, reduce_len=True)
+_tweet_tok_keepcase = TweetTokenizer(preserve_case=True, strip_handles=True, reduce_len=True)
 
 # --- 4.1  Regex / Noise Removal ---
 
@@ -152,26 +111,37 @@ def remove_noise(text: str) -> str:
     return text
 
 
-# --- 4.2  Lowercasing ---
+def normalize_for_transformer(text: str) -> str:
+    """
+    Lightweight normalization for transformer models.
+    Replaces noisy entities with common placeholder tokens and keeps most text intact.
+    """
+    text = re.sub(r"http\S+|www\.\S+", " [URL] ", text)    # URLs
+    text = re.sub(r"@\w+", " [USER] ", text)                 # mentions
+    text = re.sub(r"\$[A-Za-z]+", " [CASHTAG] ", text)      # cashtags
+    text = re.sub(r"#(\w+)", r" [HASHTAG] \1 ", text)       # hashtag marker + token
+    text = re.sub(r"\bRT\b", " [RT] ", text)                # retweet marker
+    text = re.sub(r"&[a-z]+;", " ", text)                    # basic HTML entities
+    text = re.sub(r"\s+", " ", text).strip()                # whitespace
+    return text
 
-def to_lowercase(text: str) -> str:
-    return text.lower()
 
+# --- 4.2  Tokenization ---
 
-# --- 4.3  Tokenization ---
-
-def tokenize(text: str, mode: str = "tweet") -> list[str]:
+def tokenize(text: str, mode: str = "tweet", preserve_case: bool = False) -> list[str]:
     """
     Tokenize text.
     mode='tweet' uses NLTK TweetTokenizer (recommended for tweets).
     mode='word'  uses NLTK word_tokenize.
+    preserve_case=False lowercases during tokenization.
     """
     if mode == "tweet":
-        return _tweet_tok.tokenize(text)
-    return word_tokenize(text)
+        tokenizer = _tweet_tok_keepcase if preserve_case else _tweet_tok_lower
+        return tokenizer.tokenize(text)
+    return word_tokenize(text if preserve_case else text.lower())
 
 
-# --- 4.4  Stop Word Removal ---
+# --- 4.3  Stop Word Removal ---
 
 def remove_stopwords(tokens: list[str], extra_keep: set | None = None) -> list[str]:
     """
@@ -182,7 +152,7 @@ def remove_stopwords(tokens: list[str], extra_keep: set | None = None) -> list[s
     return [t for t in tokens if t not in _stop_words or t in keep]
 
 
-# --- 4.5  Lemmatization ---
+# --- 4.4  Lemmatization ---
 
 def _get_wordnet_pos(treebank_tag: str) -> str:
     """Map POS treebank tag to WordNet POS constant."""
@@ -201,129 +171,41 @@ def lemmatize(tokens: list[str]) -> list[str]:
     return [_lemmatizer.lemmatize(word, _get_wordnet_pos(tag)) for word, tag in tagged]
 
 
-# --- 4.6  Stemming ---
-
-def stem_porter(tokens: list[str]) -> list[str]:
-    """Stem tokens using Porter Stemmer."""
-    return [_porter.stem(t) for t in tokens]
-
-
-def stem_snowball(tokens: list[str]) -> list[str]:
-    """Stem tokens using Snowball Stemmer."""
-    return [_snowball.stem(t) for t in tokens]
-
-
 # =============================================================================
-# 5. FULL PREPROCESSING PIPELINES
+# 5. FULL PREPROCESSING PIPELINE
 # =============================================================================
 
-def preprocess_lemma(text: str, keep_stopwords: set | None = None) -> str:
+def preprocess_pipeline(
+    series: pd.Series,
+    mode: str = "classical",
+    keep_stopwords: set | None = None,
+) -> pd.Series:
     """
-    Pipeline A — Lemmatization (recommended for traditional ML + Transformers input).
-    Steps: noise removal → lowercase → tokenize → stopwords → lemmatize → rejoin
-    """
-    text   = remove_noise(text)
-    text   = to_lowercase(text)
-    tokens = tokenize(text, mode="tweet")
-    tokens = remove_stopwords(tokens, extra_keep=keep_stopwords)
-    tokens = lemmatize(tokens)
-    return " ".join(tokens)
+    Apply project preprocessing to a pandas Series of texts.
 
+    mode='classical' uses NLTK-style preprocessing for classic ML pipelines.
+    mode='transformer' uses lightweight normalization with placeholder tokens.
+    """
 
-def preprocess_stem(text: str, stemmer: str = "porter", keep_stopwords: set | None = None) -> str:
-    """
-    Pipeline B — Stemming.
-    Steps: noise removal → lowercase → tokenize → stopwords → stem → rejoin
-    stemmer: 'porter' | 'snowball'
-    """
-    text   = remove_noise(text)
-    text   = to_lowercase(text)
-    tokens = tokenize(text, mode="tweet")
-    tokens = remove_stopwords(tokens, extra_keep=keep_stopwords)
-    tokens = stem_porter(tokens) if stemmer == "porter" else stem_snowball(tokens)
-    return " ".join(tokens)
+    if mode not in {"classical", "transformer"}:
+        raise ValueError("Invalid mode. Expected 'classical' or 'transformer'.")
 
+    def _preprocess_text(text: str) -> str:
+        current = str(text)
 
-def preprocess_raw_clean(text: str) -> str:
-    """
-    Pipeline C — Light cleaning only (for Transformer models that do their own tokenization).
-    Steps: noise removal → lowercase
-    """
-    text = remove_noise(text)
-    text = to_lowercase(text)
-    return text
+        if mode == "transformer":
+            return normalize_for_transformer(current)
 
+        current = remove_noise(current)
+        tokens = tokenize(current, mode="tweet", preserve_case=False)
+        tokens = remove_stopwords(tokens, extra_keep=keep_stopwords)
+        tokens = lemmatize(tokens)
+        return " ".join(tokens)
 
-def apply_preprocessing(series: pd.Series, pipeline: str = "lemma", **kwargs) -> pd.Series:
-    """
-    Apply a named preprocessing pipeline to a pandas Series of texts.
-    pipeline: 'lemma' | 'stem_porter' | 'stem_snowball' | 'raw_clean'
-    """
-    pipeline_map = {
-        "lemma":         preprocess_lemma,
-        "stem_porter":   lambda t: preprocess_stem(t, stemmer="porter",   **kwargs),
-        "stem_snowball": lambda t: preprocess_stem(t, stemmer="snowball",  **kwargs),
-        "raw_clean":     preprocess_raw_clean,
-    }
-    if pipeline not in pipeline_map:
-        raise ValueError(f"Unknown pipeline '{pipeline}'. Choose from: {list(pipeline_map.keys())}")
-    fn = pipeline_map[pipeline]
-    return series.apply(fn)
+    return series.fillna("").apply(_preprocess_text)
 
 # =============================================================================
-# 6. EVALUATION
-# =============================================================================
-
-def evaluate_model(
-    y_true,
-    y_pred,
-    model_name: str = "Model",
-    print_report: bool = True,
-) -> dict:
-    """
-    Compute Accuracy, Precision, Recall and F1 (all macro-averaged).
-    Returns a dict suitable for building a metrics DataFrame.
-    """
-    metrics = {
-        "model":     model_name,
-        "accuracy":  round(accuracy_score(y_true, y_pred), 4),
-        "precision": round(precision_score(y_true, y_pred, average="macro", zero_division=0), 4),
-        "recall":    round(recall_score(y_true, y_pred, average="macro",    zero_division=0), 4),
-        "f1_macro":  round(f1_score(y_true, y_pred, average="macro",        zero_division=0), 4),
-    }
-    if print_report:
-        print(f"\n{'='*50}")
-        print(f"  {model_name}")
-        print(f"{'='*50}")
-        print(classification_report(
-            y_true, y_pred,
-            target_names=[LABEL_MAP[i] for i in sorted(LABEL_MAP)],
-            zero_division=0,
-        ))
-    return metrics
-
-
-def plot_confusion_matrix(y_true, y_pred, model_name: str = "Model") -> None:
-    """Plot a labeled confusion matrix."""
-    labels = [LABEL_MAP[i] for i in sorted(LABEL_MAP)]
-    cm     = confusion_matrix(y_true, y_pred)
-    disp   = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
-    fig, ax = plt.subplots(figsize=(6, 5))
-    disp.plot(ax=ax, colorbar=False, cmap="Blues")
-    ax.set_title(f"Confusion Matrix — {model_name}", fontsize=13, pad=12)
-    plt.tight_layout()
-    plt.show()
-
-
-def build_metrics_df(metrics_list: list[dict]) -> pd.DataFrame:
-    """
-    Turn a list of evaluate_model() dicts into a sorted comparison DataFrame.
-    """
-    df = pd.DataFrame(metrics_list).sort_values("f1_macro", ascending=False)
-    return df.reset_index(drop=True)
-
-# =============================================================================
-# 7. EDA PLOTTING HELPERS
+# 6. EDA PLOTTING HELPERS
 # =============================================================================
 
 def plot_class_distribution(df: pd.DataFrame, label_col: str = "label") -> None:
@@ -355,7 +237,7 @@ def plot_tweet_length_distribution(df: pd.DataFrame, text_col: str = "text", lab
     df = df.copy()
     df["_len"] = df[text_col].str.len()
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    _, axes = plt.subplots(1, 2, figsize=(13, 4))
 
     # Character length
     for label, group in df.groupby(label_col):
@@ -421,17 +303,22 @@ def show_preprocessing_examples(
     text_col: str = "text",
     n: int = 5,
     pipeline_fn=None,
+    **pipeline_kwargs,
 ) -> pd.DataFrame:
     """
     Show side-by-side original vs. preprocessed tweet examples.
-    pipeline_fn: a callable that takes raw text and returns cleaned text.
-                 Defaults to preprocess_lemma if None.
+    pipeline_fn: a callable that takes a pandas Series and returns a pandas Series.
+                 Defaults to preprocess_pipeline if None.
+    pipeline_kwargs: optional keyword args passed to pipeline_fn.
     """
     if pipeline_fn is None:
-        pipeline_fn = preprocess_lemma
+        pipeline_fn = preprocess_pipeline
+
     sample = df[text_col].sample(n, random_state=RANDOM_STATE).reset_index(drop=True)
+    processed = pipeline_fn(sample, **pipeline_kwargs)
+
     result = pd.DataFrame({
         "original":     sample,
-        "preprocessed": sample.apply(pipeline_fn),
+        "preprocessed": processed,
     })
     return result

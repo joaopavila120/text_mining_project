@@ -2,6 +2,7 @@ import os
 import re
 import pickle
 import warnings
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -18,6 +19,16 @@ from nltk.corpus import wordnet
 from nltk import pos_tag
 
 # --- Sklearn ---
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    classification_report,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+)
 from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
@@ -322,3 +333,221 @@ def show_preprocessing_examples(
         "preprocessed": processed,
     })
     return result
+
+
+# =============================================================================
+# 7. EVALUATION + TRANSFORMER HELPERS
+# =============================================================================
+
+def evaluate_model(y_true, y_pred, model_name: str = "Model") -> dict:
+    """Compute macro classification metrics and print a full report."""
+    metrics = {
+        "model": model_name,
+        "accuracy": round(accuracy_score(y_true, y_pred), 4),
+        "precision": round(precision_score(y_true, y_pred, average="macro", zero_division=0), 4),
+        "recall": round(recall_score(y_true, y_pred, average="macro", zero_division=0), 4),
+        "f1_macro": round(f1_score(y_true, y_pred, average="macro", zero_division=0), 4),
+    }
+
+    print(f"\n{'=' * 70}")
+    print(model_name)
+    print(f"{'=' * 70}")
+    print(
+        classification_report(
+            y_true,
+            y_pred,
+            labels=sorted(LABEL_MAP),
+            target_names=[LABEL_MAP[i] for i in sorted(LABEL_MAP)],
+            zero_division=0,
+        )
+    )
+    return metrics
+
+
+def plot_model_confusion_matrix(y_true, y_pred, model_name: str = "Model") -> None:
+    """Plot a confusion matrix using the project label names."""
+    labels = [LABEL_MAP[i] for i in sorted(LABEL_MAP)]
+    cm = confusion_matrix(y_true, y_pred, labels=sorted(LABEL_MAP))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    disp.plot(ax=ax, colorbar=False, cmap="Blues")
+    ax.set_title(f"Confusion Matrix - {model_name}")
+    plt.tight_layout()
+    plt.show()
+
+
+def detect_transformer_device() -> tuple[int, str]:
+    """
+    Detect the execution device for Hugging Face pipelines.
+    Returns (device_id, device_name), where device_id is 0 for CUDA and -1 for CPU.
+    """
+    try:
+        import torch
+    except ImportError:
+        return -1, "cpu"
+
+    if torch.cuda.is_available():
+        return 0, "cuda"
+    return -1, "cpu"
+
+
+def safe_model_name(model_checkpoint: str) -> str:
+    """Convert a model checkpoint name into a filesystem-safe suffix."""
+    return model_checkpoint.replace("/", "__").replace("-", "_")
+
+
+def get_transformer_embedding_cache_path(
+    model_checkpoint: str,
+    split_name: str,
+    n_examples: int,
+    max_length: int,
+    cache_dir: str,
+) -> str:
+    """Build the embedding cache path for a given model and split."""
+    safe_name = safe_model_name(model_checkpoint)
+    return os.path.join(
+        cache_dir,
+        f"{split_name}_{safe_name}_n{n_examples}_l{max_length}.pkl",
+    )
+
+
+def generate_cls_embeddings(
+    texts,
+    embeddings_model,
+    batch_size: int = 16,
+    max_length: int = 96,
+    desc: str = "Generating embeddings",
+) -> np.ndarray:
+    """
+    Extract the first-token embedding for each text.
+    For BERT/RoBERTa-like encoders, this vector is a simple sentence-level representation.
+    """
+    try:
+        from tqdm.notebook import tqdm
+    except ImportError:
+        def tqdm(iterable, **kwargs):
+            return iterable
+
+    vectors = []
+    for i in tqdm(range(0, len(texts), batch_size), desc=desc):
+        batch = list(texts[i : i + batch_size])
+        outputs = embeddings_model(
+            batch,
+            truncation=True,
+            padding=True,
+            max_length=max_length,
+        )
+        for out in outputs:
+            arr = np.asarray(out, dtype=np.float32)
+            if arr.ndim == 3:
+                arr = arr[0]
+            vectors.append(arr[0])
+    return np.vstack(vectors)
+
+
+def run_transformer_encoder_experiment(
+    experiment_name: str,
+    model_checkpoint: str,
+    X_train_text,
+    y_train_labels,
+    X_val_text,
+    y_val_labels,
+    cache_dir: str,
+    batch_size: int = 16,
+    max_length: int = 96,
+    device: int | None = None,
+) -> dict:
+    """
+    Generate encoder features, train Logistic Regression, and evaluate the result.
+    Embeddings are cached on disk to avoid recomputation.
+    """
+    try:
+        from transformers import pipeline
+    except ImportError as exc:
+        raise ImportError(
+            "transformers is required for Transformer encoder experiments. "
+            "Install it with: pip install transformers torch accelerate"
+        ) from exc
+
+    if device is None:
+        device, _ = detect_transformer_device()
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    train_cache_path = get_transformer_embedding_cache_path(
+        model_checkpoint=model_checkpoint,
+        split_name="train",
+        n_examples=len(X_train_text),
+        max_length=max_length,
+        cache_dir=cache_dir,
+    )
+    val_cache_path = get_transformer_embedding_cache_path(
+        model_checkpoint=model_checkpoint,
+        split_name="val",
+        n_examples=len(X_val_text),
+        max_length=max_length,
+        cache_dir=cache_dir,
+    )
+
+    x_train_emb = None
+    x_val_emb = None
+
+    if os.path.exists(train_cache_path):
+        with open(train_cache_path, "rb") as f:
+            x_train_emb = pickle.load(f)
+        print(f"Loaded cached train embeddings from {train_cache_path}")
+
+    if os.path.exists(val_cache_path):
+        with open(val_cache_path, "rb") as f:
+            x_val_emb = pickle.load(f)
+        print(f"Loaded cached validation embeddings from {val_cache_path}")
+
+    if x_train_emb is None or x_val_emb is None:
+        embeddings_model = pipeline(
+            "feature-extraction",
+            model=model_checkpoint,
+            tokenizer=model_checkpoint,
+            batch_size=batch_size,
+            device=device,
+        )
+
+        if x_train_emb is None:
+            x_train_emb = generate_cls_embeddings(
+                texts=list(X_train_text),
+                embeddings_model=embeddings_model,
+                batch_size=batch_size,
+                max_length=max_length,
+                desc=f"{experiment_name} - train",
+            )
+            with open(train_cache_path, "wb") as f:
+                pickle.dump(x_train_emb, f)
+            print(f"Saved train embeddings to {train_cache_path}")
+
+        if x_val_emb is None:
+            x_val_emb = generate_cls_embeddings(
+                texts=list(X_val_text),
+                embeddings_model=embeddings_model,
+                batch_size=batch_size,
+                max_length=max_length,
+                desc=f"{experiment_name} - validation",
+            )
+            with open(val_cache_path, "wb") as f:
+                pickle.dump(x_val_emb, f)
+            print(f"Saved validation embeddings to {val_cache_path}")
+
+    classifier = LogisticRegression(
+        max_iter=2000,
+        class_weight="balanced",
+        random_state=RANDOM_STATE,
+    )
+    classifier.fit(x_train_emb, np.asarray(y_train_labels))
+
+    y_pred = classifier.predict(x_val_emb)
+    metrics = evaluate_model(y_val_labels, y_pred, model_name=experiment_name)
+
+    return {
+        "checkpoint": model_checkpoint,
+        "classifier": classifier,
+        "metrics": metrics,
+        "predictions": y_pred,
+    }

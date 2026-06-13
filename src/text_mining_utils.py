@@ -20,6 +20,7 @@ from nltk import pos_tag
 
 # --- Sklearn ---
 from sklearn.linear_model import LogisticRegression
+from sklearn.base import clone
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -339,8 +340,13 @@ def show_preprocessing_examples(
 # 7. EVALUATION + TRANSFORMER HELPERS
 # =============================================================================
 
-def evaluate_model(y_true, y_pred, model_name: str = "Model") -> dict:
-    """Compute macro classification metrics and print a full report."""
+def evaluate_model(
+    y_true,
+    y_pred,
+    model_name: str = "Model",
+    verbose: bool = True,
+) -> dict:
+    """Compute macro classification metrics and optionally print a full report."""
     metrics = {
         "model": model_name,
         "accuracy": round(accuracy_score(y_true, y_pred), 4),
@@ -349,18 +355,19 @@ def evaluate_model(y_true, y_pred, model_name: str = "Model") -> dict:
         "f1_macro": round(f1_score(y_true, y_pred, average="macro", zero_division=0), 4),
     }
 
-    print(f"\n{'=' * 70}")
-    print(model_name)
-    print(f"{'=' * 70}")
-    print(
-        classification_report(
-            y_true,
-            y_pred,
-            labels=sorted(LABEL_MAP),
-            target_names=[LABEL_MAP[i] for i in sorted(LABEL_MAP)],
-            zero_division=0,
+    if verbose:
+        print(f"\n{'=' * 70}")
+        print(model_name)
+        print(f"{'=' * 70}")
+        print(
+            classification_report(
+                y_true,
+                y_pred,
+                labels=sorted(LABEL_MAP),
+                target_names=[LABEL_MAP[i] for i in sorted(LABEL_MAP)],
+                zero_division=0,
+            )
         )
-    )
     return metrics
 
 
@@ -463,6 +470,8 @@ def run_transformer_encoder_experiment(
     batch_size: int = 16,
     max_length: int = 96,
     device: int | None = None,
+    classifier=None,
+    verbose: bool = True,
 ) -> dict:
     """
     Generate encoder features, train Logistic Regression, and evaluate the result.
@@ -543,19 +552,28 @@ def run_transformer_encoder_experiment(
                 pickle.dump(x_val_emb, f)
             print(f"Saved validation embeddings to {val_cache_path}")
 
-    classifier = LogisticRegression(
-        max_iter=2000,
-        class_weight="balanced",
-        random_state=RANDOM_STATE,
-    )
-    classifier.fit(x_train_emb, np.asarray(y_train_labels))
+    if classifier is None:
+        estimator = LogisticRegression(
+            max_iter=2000,
+            class_weight="balanced",
+            random_state=RANDOM_STATE,
+        )
+    else:
+        estimator = clone(classifier)
 
-    y_pred = classifier.predict(x_val_emb)
-    metrics = evaluate_model(y_val_labels, y_pred, model_name=experiment_name)
+    estimator.fit(x_train_emb, np.asarray(y_train_labels))
+
+    y_pred = estimator.predict(x_val_emb)
+    metrics = evaluate_model(
+        y_val_labels,
+        y_pred,
+        model_name=experiment_name,
+        verbose=verbose,
+    )
 
     return {
         "checkpoint": model_checkpoint,
-        "classifier": classifier,
+        "classifier": estimator,
         "metrics": metrics,
         "predictions": y_pred,
     }

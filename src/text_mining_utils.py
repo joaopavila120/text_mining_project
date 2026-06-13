@@ -413,35 +413,42 @@ def get_transformer_embedding_cache_path(
 
 def generate_cls_embeddings(
     texts,
-    embeddings_model,
+    tokenizer,
+    model,
     batch_size: int = 16,
     max_length: int = 96,
     desc: str = "Generating embeddings",
+    device: str = "cpu",
 ) -> np.ndarray:
     """
-    Extract the first-token embedding for each text.
-    For BERT/RoBERTa-like encoders, this vector is a simple sentence-level representation.
+    Extract the [CLS] token embedding from the encoder's last hidden state.
+    Uses AutoModel directly (encoder only) — avoids LM-head UNEXPECTED-key warnings
+    that appear when pipeline('feature-extraction') loads the full masked-LM head.
     """
+    import torch
+
     try:
         from tqdm.notebook import tqdm
     except ImportError:
         def tqdm(iterable, **kwargs):
             return iterable
 
+    model.eval()
+    model.to(device)
     vectors = []
-    for i in tqdm(range(0, len(texts), batch_size), desc=desc):
-        batch = list(texts[i : i + batch_size])
-        outputs = embeddings_model(
-            batch,
-            truncation=True,
-            padding=True,
-            max_length=max_length,
-        )
-        for out in outputs:
-            arr = np.asarray(out, dtype=np.float32)
-            if arr.ndim == 3:
-                arr = arr[0]
-            vectors.append(arr[0])
+    with torch.no_grad():
+        for i in tqdm(range(0, len(texts), batch_size), desc=desc):
+            batch = list(texts[i : i + batch_size])
+            encoded = tokenizer(
+                batch,
+                truncation=True,
+                padding=True,
+                max_length=max_length,
+                return_tensors="pt",
+            ).to(device)
+            outputs = model(**encoded)
+            cls_vecs = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+            vectors.append(cls_vecs)
     return np.vstack(vectors)
 
 
@@ -462,7 +469,7 @@ def run_transformer_encoder_experiment(
     Embeddings are cached on disk to avoid recomputation.
     """
     try:
-        from transformers import pipeline
+        from transformers import AutoTokenizer, AutoModel
     except ImportError as exc:
         raise ImportError(
             "transformers is required for Transformer encoder experiments. "
@@ -503,21 +510,20 @@ def run_transformer_encoder_experiment(
         print(f"Loaded cached validation embeddings from {val_cache_path}")
 
     if x_train_emb is None or x_val_emb is None:
-        embeddings_model = pipeline(
-            "feature-extraction",
-            model=model_checkpoint,
-            tokenizer=model_checkpoint,
-            batch_size=batch_size,
-            device=device,
-        )
+        from transformers import AutoTokenizer, AutoModel
+        torch_device = "cpu" if device == -1 else f"cuda:{device}"
+        tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
+        hf_model = AutoModel.from_pretrained(model_checkpoint)
 
         if x_train_emb is None:
             x_train_emb = generate_cls_embeddings(
                 texts=list(X_train_text),
-                embeddings_model=embeddings_model,
+                tokenizer=tokenizer,
+                model=hf_model,
                 batch_size=batch_size,
                 max_length=max_length,
                 desc=f"{experiment_name} - train",
+                device=torch_device,
             )
             with open(train_cache_path, "wb") as f:
                 pickle.dump(x_train_emb, f)
@@ -526,10 +532,12 @@ def run_transformer_encoder_experiment(
         if x_val_emb is None:
             x_val_emb = generate_cls_embeddings(
                 texts=list(X_val_text),
-                embeddings_model=embeddings_model,
+                tokenizer=tokenizer,
+                model=hf_model,
                 batch_size=batch_size,
                 max_length=max_length,
                 desc=f"{experiment_name} - validation",
+                device=torch_device,
             )
             with open(val_cache_path, "wb") as f:
                 pickle.dump(x_val_emb, f)

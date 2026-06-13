@@ -9,7 +9,7 @@ import matplotlib.ticker as mticker
 import seaborn as sns
 from collections import Counter
 from wordcloud import WordCloud
-
+from tqdm.auto import tqdm
 # --- NLTK ---
 import nltk
 from nltk.corpus import stopwords
@@ -446,6 +446,7 @@ def generate_cls_embeddings(
 
 
 def run_transformer_encoder_experiment(
+    classifier,
     experiment_name: str,
     model_checkpoint: str,
     X_train_text,
@@ -456,6 +457,7 @@ def run_transformer_encoder_experiment(
     batch_size: int = 16,
     max_length: int = 96,
     device: int | None = None,
+    
 ) -> dict:
     """
     Generate encoder features, train Logistic Regression, and evaluate the result.
@@ -535,11 +537,12 @@ def run_transformer_encoder_experiment(
                 pickle.dump(x_val_emb, f)
             print(f"Saved validation embeddings to {val_cache_path}")
 
+    """
     classifier = LogisticRegression(
         max_iter=2000,
         class_weight="balanced",
         random_state=RANDOM_STATE,
-    )
+    )"""
     classifier.fit(x_train_emb, np.asarray(y_train_labels))
 
     y_pred = classifier.predict(x_val_emb)
@@ -550,4 +553,5 @@ def run_transformer_encoder_experiment(
         "classifier": classifier,
         "metrics": metrics,
         "predictions": y_pred,
+        "x_train_emb": x_train_emb,  
     }

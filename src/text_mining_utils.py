@@ -9,7 +9,7 @@ import matplotlib.ticker as mticker
 import seaborn as sns
 from collections import Counter
 from wordcloud import WordCloud
-
+from tqdm.auto import tqdm
 # --- NLTK ---
 import nltk
 from nltk.corpus import stopwords
@@ -460,6 +460,7 @@ def generate_cls_embeddings(
 
 
 def run_transformer_encoder_experiment(
+    classifier,
     experiment_name: str,
     model_checkpoint: str,
     X_train_text,
@@ -576,4 +577,5 @@ def run_transformer_encoder_experiment(
         "classifier": estimator,
         "metrics": metrics,
         "predictions": y_pred,
+        "x_train_emb": x_train_emb,  
     }

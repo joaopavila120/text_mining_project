@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+.env
+
+# Generated project artifacts
+artifacts/
+data/transformer_cache/
+data/*.pkl
+
+# Common local output files
+*.log
+*.tmp
+*.bak

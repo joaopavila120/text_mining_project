@@ -31,7 +31,11 @@ def make_executor(agent):
     def invoke(payload: dict):
         user_input = payload.get("input", "") if isinstance(payload, dict) else str(payload)
         result = agent.invoke({"messages": [{"role": "user", "content": user_input}]})
-        return {"output": _extract_text(result), "intermediate_steps": []}
+        return {
+            "output": _extract_text(result),
+            "intermediate_steps": [],
+            "messages": result.get("messages", []) if isinstance(result, dict) else [],
+        }
 
     return SimpleNamespace(invoke=invoke)
 
@@ -53,7 +57,11 @@ def make_memory_executor(agent):
         output = _extract_text(result)
         history.append(f"User: {user_input}")
         history.append(f"Assistant: {output}")
-        return {"output": output, "intermediate_steps": []}
+        return {
+            "output": output,
+            "intermediate_steps": [],
+            "messages": result.get("messages", []) if isinstance(result, dict) else [],
+        }
 
     return SimpleNamespace(invoke=invoke)
 
@@ -294,7 +302,50 @@ def print_trace(result):
     """Pretty-print intermediate tool traces from agent execution."""
     steps = result.get("intermediate_steps", [])
     if not steps:
-        print("  (no tool calls in this run)")
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        tool_outputs_by_id = {}
+        for msg in messages:
+            msg_type = getattr(msg, "type", "")
+            if msg_type == "tool":
+                call_id = getattr(msg, "tool_call_id", None)
+                tool_outputs_by_id[call_id] = getattr(msg, "content", "")
+
+        parsed_steps = []
+        for msg in messages:
+            tool_calls = getattr(msg, "tool_calls", None)
+            if not tool_calls:
+                continue
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                tool_name = call.get("name", "unknown_tool")
+                tool_input = call.get("args", {})
+                call_id = call.get("id")
+                observation = tool_outputs_by_id.get(call_id, "")
+                parsed_steps.append((tool_name, tool_input, observation))
+
+        if not parsed_steps:
+            print("  (no tool calls in this run)")
+            return
+
+        bar = "-" * 62
+        print(" ### AGENT THOUGHT TRACE ###")
+        print()
+        for i, (tool_name, tool_input, observation) in enumerate(parsed_steps):
+            inp_str = str(tool_input)
+            if len(inp_str) > 120:
+                inp_str = inp_str[:120] + "-"
+            obs_str = str(observation)
+            if len(obs_str) > 400:
+                obs_str = obs_str[:400] + "[-truncated]"
+
+            print(f"  Step {i + 1}")
+            print(bar)
+            print("  Thought: (tool call captured from agent messages)")
+            print(f"  Tool used: {tool_name}  - (Tool's input): ({inp_str})")
+            print(f"         -  Result: {obs_str}")
+            if i < len(parsed_steps) - 1:
+                print()
         return
 
     bar = "-" * 62

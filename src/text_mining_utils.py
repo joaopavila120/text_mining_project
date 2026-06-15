@@ -48,6 +48,21 @@ try:
 except ImportError:
     HAS_TRANSFORMERS = False
 
+
+class _HFTextDataset(torch.utils.data.Dataset if HAS_TRANSFORMERS else object):
+    """Minimal HuggingFace-compatible dataset wrapping tokenizer encodings."""
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = list(labels)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        item = {k: v[idx] for k, v in self.encodings.items()}
+        item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
+        return item
+
 Word2Vec = None
 try:
     _gensim_models = importlib.import_module("gensim.models")
@@ -516,18 +531,6 @@ def run_finetune_encoder_cv_experiment(
 
     import inspect
 
-    class _HFTextDataset(torch.utils.data.Dataset):
-        def __init__(self, encodings, labels):
-            self.encodings = encodings
-            self.labels = list(labels)
-
-        def __len__(self):
-            return len(self.labels)
-
-        def __getitem__(self, idx):
-            item = {k: v[idx] for k, v in self.encodings.items()}
-            item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
-            return item
 
     def _compute_macro(y_true, y_pred):
         precision, recall, f1, _ = precision_recall_fscore_support(
